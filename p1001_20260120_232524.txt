@@ -1,0 +1,11 @@
+Patient ID: p1001
+Previous: 100
+Current: 70
+Risk: HIGH
+Trend: IMPROVING
+Comparison: Reduced from 100 to 70
+Reasons:
+- Chest related symptom
+- Pain reported
+- ECG file submitted
+- X-ray image submitted
