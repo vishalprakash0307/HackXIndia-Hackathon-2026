@@ -1,138 +1,116 @@
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
-import tensorflow as tf
-import numpy as np
+from flask import Flask, request, jsonify, send_from_directory, redirect, url_for
 import os
-import uuid
-
-from utils.pdf_report import generate_pdf
-from utils.voice_report import generate_voice_report
+from datetime import datetime
 
 app = Flask(__name__)
-CORS(app)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+REPORT_DIR = os.path.join(BASE_DIR, "reports")
+os.makedirs(REPORT_DIR, exist_ok=True)
 
-# ---------------- LOAD MODELS ----------------
-text_model = tf.keras.models.load_model("text_model/text_model.h5")
-xray_model = tf.keras.models.load_model("xray_model/xray_model.h5")
-ecg_model = tf.keras.models.load_model("ecg_model/ecg_model.h5")
+PATIENT_HISTORY = {}
 
-# ---------------- CACHE ----------------
-patient_cache = {}
-previous_severity = {}
+# ---------------- LOGIN ----------------
+@app.route("/")
+def login_page():
+    return send_from_directory("static", "login.html")
 
-# ---------------- HELPERS ----------------
-def symptom_score(text):
-    keywords = {
-        "chest pain": 30,
-        "breathlessness": 30,
-        "sweating": 20,
-        "fever": 15,
-        "cough": 10,
-        "stomach pain": 5,
-        "nausea": 5
-    }
-    score = 0
-    for k, v in keywords.items():
-        if k in text.lower():
-            score += v
-    return score
+@app.route("/login", methods=["POST"])
+def login():
+    # simple hackathon login (no auth)
+    return redirect("/dashboard")
 
-def classify_risk(score):
-    if score >= 80: return "CRITICAL"
-    if score >= 60: return "HIGH"
-    if score >= 40: return "MODERATE"
-    return "LOW"
+# ---------------- DASHBOARD ----------------
+@app.route("/dashboard")
+def dashboard():
+    return send_from_directory("static", "dashboard.html")
 
-# ---------------- PREDICT ----------------
-@app.route("/predict", methods=["POST"])
-def predict():
-    pid = str(uuid.uuid4())[:8]
-    symptoms = request.form.get("symptoms", "")
+# ---------------- ANALYSIS ----------------
+@app.route("/analyze", methods=["POST"])
+def analyze():
+    try:
+        patient_id = request.form.get("patient_id")
+        symptoms = request.form.get("symptoms", "").lower()
 
-    severity = symptom_score(symptoms)
+        if not patient_id or not symptoms:
+            return jsonify({"error": "Patient ID and symptoms required"}), 400
 
-    reasons = []
-    if "chest pain" in symptoms.lower():
-        reasons.append("Chest pain detected")
-    if "breathlessness" in symptoms.lower():
-        reasons.append("Breathing difficulty detected")
+        severity = 0
+        reasons = []
 
-    # X-RAY (OPTIONAL)
-    if "xray" in request.files:
-        img = tf.keras.preprocessing.image.load_img(
-            request.files["xray"], target_size=(224, 224), color_mode="grayscale"
-        )
-        arr = tf.keras.preprocessing.image.img_to_array(img) / 255.0
-        arr = np.expand_dims(arr, axis=0)
-        xray_conf = float(xray_model.predict(arr)[0][0])
-        if xray_conf > 0.6:
+        if "chest" in symptoms:
+            severity += 40
+            reasons.append("Chest related symptom")
+        if "breath" in symptoms:
+            severity += 30
+            reasons.append("Breathing issue")
+        if "fever" in symptoms:
             severity += 20
-            reasons.append("X-ray indicates lung abnormality")
+            reasons.append("Fever present")
+        if "pain" in symptoms:
+            severity += 10
+            reasons.append("Pain reported")
 
-    # ECG (OPTIONAL)
-    if "ecg" in request.files:
-        data = np.loadtxt(request.files["ecg"])
-        data = np.expand_dims(data, axis=0)
-        ecg_conf = float(ecg_model.predict(data)[0][0])
-        if ecg_conf > 0.6:
-            severity += 20
-            reasons.append("ECG indicates cardiac abnormality")
+        if "ecg" in request.files and request.files["ecg"].filename:
+            severity += 10
+            reasons.append("ECG file submitted")
 
-    severity = min(severity, 100)
-    risk = classify_risk(severity)
+        if "xray" in request.files and request.files["xray"].filename:
+            severity += 10
+            reasons.append("X-ray image submitted")
 
-    # TREND
-    prev = previous_severity.get(pid, severity)
-    trend = "WORSENING" if severity > prev + 5 else "IMPROVING" if severity < prev - 5 else "STABLE"
-    previous_severity[pid] = severity
+        severity = min(severity, 100)
 
-    trend_data = {"previous": prev, "current": severity, "trend": trend}
+        previous = PATIENT_HISTORY.get(patient_id)
+        trend = "NEW"
+        comparison = "No previous data"
 
-    disease = [{
-        "condition": "Possible cardiopulmonary stress",
-        "reason": "Combined symptom and signal analysis"
-    }]
+        if previous is not None:
+            if severity > previous:
+                trend = "WORSENING"
+                comparison = f"Increased from {previous} to {severity}"
+            elif severity < previous:
+                trend = "IMPROVING"
+                comparison = f"Reduced from {previous} to {severity}"
+            else:
+                trend = "STABLE"
+                comparison = "No change"
 
-    # SAVE CACHE (FOR VOICE)
-    patient_cache[pid] = {
-        "severity": severity,
-        "risk": risk,
-        "reasons": reasons,
-        "trend": trend_data,
-        "disease": disease
-    }
+        PATIENT_HISTORY[patient_id] = severity
 
-    # PDF ONLY (NO VOICE HERE)
-    pdf_path = generate_pdf(pid, patient_cache[pid])
-    pdf_name = os.path.basename(pdf_path)
+        risk = "HIGH" if severity >= 70 else "MODERATE" if severity >= 40 else "LOW"
 
-    return jsonify({
-        "patient_id": pid,
-        "severity": severity,
-        "risk": risk,
-        "reasoning": reasons,
-        "trend": trend_data,
-        "pdf_url": f"http://127.0.0.1:5000/download/{pdf_name}"
-    })
+        filename = f"{patient_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        path = os.path.join(REPORT_DIR, filename)
 
-# ---------------- ON-DEMAND VOICE ----------------
-@app.route("/generate-voice/<pid>", methods=["POST"])
-def generate_voice(pid):
-    if pid not in patient_cache:
-        return jsonify({"error": "No report found"}), 404
+        with open(path, "w") as f:
+            f.write(f"Patient ID: {patient_id}\n")
+            f.write(f"Previous: {previous}\n")
+            f.write(f"Current: {severity}\n")
+            f.write(f"Risk: {risk}\n")
+            f.write(f"Trend: {trend}\n")
+            f.write(f"Comparison: {comparison}\n")
+            f.write("Reasons:\n")
+            for r in reasons:
+                f.write(f"- {r}\n")
 
-    voice_path = generate_voice_report(pid, patient_cache[pid])
-    voice_name = os.path.basename(voice_path)
+        return jsonify({
+            "previous": previous,
+            "current": severity,
+            "risk": risk,
+            "trend": trend,
+            "comparison": comparison,
+            "reasons": reasons,
+            "download": f"/report/{filename}"
+        })
 
-    return jsonify({
-        "voice_url": f"http://127.0.0.1:5000/download/{voice_name}"
-    })
+    except Exception as e:
+        print("ERROR:", e)
+        return jsonify({"error": "Internal server error"}), 500
 
-# ---------------- DOWNLOAD ----------------
-@app.route("/download/<filename>")
-def download(filename):
-    return send_from_directory(os.path.abspath("reports"), filename, as_attachment=True)
+# ---------------- REPORT ----------------
+@app.route("/report/<name>")
+def report(name):
+    return send_from_directory(REPORT_DIR, name, as_attachment=True)
 
 if __name__ == "__main__":
     app.run(debug=True)
-
