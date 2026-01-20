@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AETRIS – AI Emergency Triage</title>
+
+<style>
+body {
+    font-family: "Segoe UI", Arial, sans-serif;
+    background: #f4f6f9;
+    margin: 0;
+    padding: 0;
+}
+
+header {
+    background: #1e293b;
+    color: white;
+    padding: 15px 30px;
+    font-size: 22px;
+}
+
+.container {
+    display: flex;
+    gap: 30px;
+    padding: 30px;
+}
+
+/* LEFT PANEL */
+.left {
+    width: 35%;
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 0 10px rgba(0,0,0,0.1);
+}
+
+.left h3 {
+    margin-top: 0;
+    color: #1e293b;
+}
+
+input, textarea {
+    width: 100%;
+    padding: 10px;
+    margin: 8px 0 15px 0;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+}
+
+button {
+    width: 100%;
+    padding: 12px;
+    background: #2563eb;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    font-size: 16px;
+    cursor: pointer;
+}
+
+button:hover {
+    background: #1d4ed8;
+}
+
+/* RIGHT PANEL */
+.right {
+    width: 65%;
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 0 10px rgba(0,0,0,0.1);
+}
+
+.section {
+    margin-bottom: 20px;
+}
+
+.badge {
+    display: inline-block;
+    padding: 6px 12px;
+    border-radius: 20px;
+    color: white;
+    font-weight: bold;
+}
+
+.low { background: #22c55e; }
+.moderate { background: #facc15; color:black; }
+.high { background: #f97316; }
+.critical { background: #dc2626; }
+
+canvas {
+    border: 1px solid #ccc;
+    width: 100%;
+}
+
+img {
+    max-width: 200px;
+    display: block;
+    margin-top: 10px;
+}
+
+#output ul {
+    padding-left: 20px;
+}
+
+.voice-btn {
+    background: #10b981;
+    margin-top: 10px;
+}
+
+.voice-btn:disabled {
+    background: #9ca3af;
+}
+</style>
+</head>
+
+<body>
+
+<header>
+    🏥 AETRIS – AI Emergency Triage Dashboard
+</header>
+
+<div class="container">
+
+<!-- LEFT PANEL -->
+<div class="left">
+    <h3>Patient Input</h3>
+
+    <label>Patient ID</label>
+    <input id="pid" placeholder="P1001">
+
+    <label>Symptoms</label>
+    <textarea id="symptoms" rows="4"
+    placeholder="severe chest pain with breathlessness and high fever"></textarea>
+
+    <label>Upload ECG (optional)</label>
+    <input type="file" id="ecg">
+    <canvas id="ecgCanvas" height="120"></canvas>
+
+    <label>Upload X-Ray (optional)</label>
+    <input type="file" id="xray">
+    <img id="xrayPreview">
+
+    <button onclick="analyze()">Analyze Patient</button>
+</div>
+
+<!-- RIGHT PANEL -->
+<div class="right">
+    <h3>Analysis Result</h3>
+
+    <div id="output">
+        <p>Run analysis to see results.</p>
+    </div>
+
+    <button id="voiceBtn" class="voice-btn" onclick="playVoice()" disabled>
+        🔊 Voice Explanation
+    </button>
+</div>
+
+</div>
+
+<script>
+let explanation = "";
+
+function resetState(){
+    explanation="";
+    output.innerHTML="<p>Analyzing...</p>";
+    voiceBtn.disabled=true;
+}
+
+function analyze(){
+    resetState();
+
+    const pid = document.getElementById("pid").value.trim();
+    const symptoms = document.getElementById("symptoms").value.trim();
+
+    if(!pid || !symptoms){
+        alert("Patient ID and symptoms required");
+        return;
+    }
+
+    const fd = new FormData();
+    fd.append("patient_id",pid);
+    fd.append("symptoms",symptoms);
+
+    if(ecg.files.length>0) fd.append("ecg",ecg.files[0]);
+    if(xray.files.length>0) fd.append("xray",xray.files[0]);
+
+    fetch("/analyze",{method:"POST",body:fd})
+    .then(r=>r.json())
+    .then(d=>{
+        explanation =
+        `Previous severity ${d.previous}. Current severity ${d.current}.
+        Risk ${d.risk}. Trend ${d.trend}. ${d.comparison}.`;
+
+        let riskClass =
+            d.risk==="CRITICAL"?"critical":
+            d.risk==="HIGH"?"high":
+            d.risk==="MODERATE"?"moderate":"low";
+
+        output.innerHTML=`
+        <div class="section">
+            <b>Severity:</b> ${d.current}
+            <span class="badge ${riskClass}">${d.risk}</span>
+        </div>
+
+        <div class="section">
+            <b>Trend:</b> ${d.trend}<br>
+            ${d.comparison}
+        </div>
+
+        <div class="section">
+            <b>Reasons:</b>
+            <ul>${d.reasons.map(r=>`<li>${r}</li>`).join("")}</ul>
+        </div>
+
+        <a href="${d.download}" target="_blank">📄 Download Report</a>
+        `;
+
+        voiceBtn.disabled=false;
+    })
+    .catch(()=>alert("Analyze failed"));
+}
+
+function playVoice(){
+    speechSynthesis.cancel();
+    speechSynthesis.speak(new SpeechSynthesisUtterance(explanation));
+}
+
+/* ECG draw */
+ecg.onchange=function(){
+    const r=new FileReader();
+    r.onload=()=>{
+        const v=r.result.split(/[\s,]+/).map(Number);
+        const c=ecgCanvas.getContext("2d");
+        c.clearRect(0,0,ecgCanvas.width,ecgCanvas.height);
+        c.beginPath();
+        v.slice(0,500).forEach((x,i)=>{
+            let y=60-x*20;
+            i?c.lineTo(i,y):c.moveTo(i,y);
+        });
+        c.strokeStyle="green";
+        c.stroke();
+    };
+    r.readAsText(ecg.files[0]);
+};
+
+/* Xray preview */
+xray.onchange=function(){
+    const r=new FileReader();
+    r.onload=()=>xrayPreview.src=r.result;
+    r.readAsDataURL(xray.files[0]);
+};
+</script>
+
+</body>
+</html>
