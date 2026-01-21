@@ -89,6 +89,10 @@ It helps reduce response time, supports better decisions, and provides clear exp
 
 ---
 
+Demo Video:
+
+https://youtu.be/OaZp-6E1e4w (link for demo video )
+
 ## Future Scope
 
 - Deep learning models for ECG and X-ray interpretation
